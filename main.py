@@ -39,3 +39,51 @@ def apply_rotary_pos_emb(x, cos, sin):
 
     return torch.stack([rotated_x1, rotated_x2], dim=-1).flatten(-2)
 
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert config.d_model % config.n_head == 0, "d_model must be divisible by n_head"
+        
+        self.c_attn = nn.Linear(config.d_model, 3*config.d_model, bias=config.bias)
+        self.c_proj = nn.Linear(config.d_model, config.d_model, bias=config.bias)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+
+        self.n_head = config.n_head
+        self.d_model = config.d_model
+        self.head_dim = config.d_model // config.n_head
+
+        self.rope = RoPE(self.head_dim, max_seq_len=config.max_seq_len)
+
+    def forward(self, x):
+        B, T, C = x.size()
+
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.d_model, dim=2)
+        # Reshape for multi-head attention: [B, T, C] -> [B, T, n_head, head_dim]
+        q = q.view(B, T, self.n_head, self.head_dim)
+        k = k.view(B, T, self.n_head, self.head_dim)
+        v = v.view(B, T, self.n_head, self.head_dim)
+
+        cos, sin = self.rope(T, x.device)
+        q = apply_rotary_pos_emb(q, cos, sin)
+        k = apply_rotary_pos_emb(k, cos, sin)
+
+        # Transpose for attention computation: [B, n_head, T, head_dim]
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        att = (q @ k.transpose(-2, -1)) * (1.0/math.sqrt(k.size(-1)))
+        causal_mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
+        att = att.masked_fill(causal_mask, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        
+        y = att @ v # [B, n_head, T, head_dim]
+
+        # Concatenate heads: [B, n_head, T, head_dim] -> [B, T, C]
+        y = y.transpose(1,2).contiguous().view(B, T, C)
+
+        y = self.resid_dropout(self.c_proj(y))
+        return y
