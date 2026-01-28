@@ -118,3 +118,92 @@ class TransformerBlock(nn.Module):
         x = x+self.attn(self.ln_1(x))
         x = x+self.mlp(self.ln_2(x))
         return x
+
+class PhonemeGPTConfig:
+    """Configuration for PhonemeGPT model"""
+    def __init__(
+        self,
+        vocab_size=50,          
+        d_model=128,            
+        n_layer=4,              
+        n_head=4,               
+        dropout=0.1,            
+        bias=False,             
+        max_seq_len=512,        
+    ):
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.n_layer = n_layer
+        self.n_head = n_head
+        self.dropout = dropout
+        self.bias = bias
+        self.max_seq_len = max_seq_len
+
+class PhonemeGPT(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+        self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(config) for _ in range(config.n_layer)
+        ])
+        self.ln_f = nn.LayerNorm(config.d_model)
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.lm_head.weight = self.token_embedding.weight
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    
+    def forward(self, idx, targets=None):
+        """
+        Args:
+            idx: Token indices [batch_size, seq_len]
+            targets: Target token indices [batch_size, seq_len] (optional, for training)
+        
+        Returns:
+            If targets is None: logits [batch_size, seq_len, vocab_size]
+            If targets provided: (loss, logits)
+        """
+        B, T = idx.size()
+        x = self.token_embedding(idx)
+
+        for block in self.blocks:
+            x = block(x)
+        
+        x = self.ln_f(x)
+        logits = self.lm_head(x) # [B, T, d_model]
+        loss = None
+
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                ignore_index=-1
+            )
+        
+        return loss, logits if targets is not None else logits
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        for _ in range(max_new_tokens):
+            idx_cond = idx if idx.size(1) <= self.config.max_seq_len else idx[:, -self.config.max_seq_len:]
+            logits = self.forward(idx_cond) # [B, T, vocab_size]
+            logits = logits[:, -1, :] / temperature # [B, vocab_size]
+            if top_k is not None:
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = -float('Inf')
+            
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1) #[B, 1]
+
+            idx = torch.cat([idx, idx_next], dim=1) # [B, T+1]
+        
+        return idx
+
