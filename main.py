@@ -87,3 +87,34 @@ class CausalSelfAttention(nn.Module):
 
         y = self.resid_dropout(self.c_proj(y))
         return y
+
+class MLP(nn.Module):
+    """
+    Linear -> GELU -> Linear -> Dropout
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc = nn.Linear(config.d_model, 4*config.d_model, bias=config.bias)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(4*config.d_model,config.d_model, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+    
+    def forward(self,x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+class TransformerBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.d_model)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = nn.LayerNorm(config.d_model)
+        self.mlp = MLP(config)
+    
+    def forward(self, x):
+        x = x+self.attn(self.ln_1(x))
+        x = x+self.mlp(self.ln_2(x))
+        return x
